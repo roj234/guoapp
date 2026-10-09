@@ -68,7 +68,7 @@ elif options.platform == 'windows':
     if not compiler:
         raise SystemExit('请安装 MinGW-w64，并将其 bin 目录加入 PATH。')
     build('windows', 'amd64', compiler, root / 'windows' / 'runner' / 'duanju_core.dll',
-          {'CGO_LDFLAGS': '-static-libgcc'})
+          {'CGO_LDFLAGS': '-static -static-libgcc'})
 else:
     compiler = shutil.which('clang')
     if not compiler:

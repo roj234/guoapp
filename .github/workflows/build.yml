@@ -20,6 +20,7 @@ env:
 
 jobs:
   checks:
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -139,8 +140,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   windows:
-    if: false
-    needs: checks
     runs-on: windows-latest
     timeout-minutes: 45
     strategy:
@@ -153,10 +152,64 @@ jobs:
             arguments: '--all-sources'
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/go.mod
+          cache-dependency-path: native/go.sum
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - name: 安装 MinGW-w64 编译器
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+          path-type: inherit
+      - name: 启用 Windows 桌面支持
+        run: flutter config --enable-windows-desktop
+      - name: 检查构建工具链
+        shell: pwsh
+        run: |
+          x86_64-w64-mingw32-gcc --version
+          go version
+          flutter --version
+      - name: 构建 Windows 包
+        run: python scripts/build_windows.py ${{ matrix.arguments }}
+      - name: 校验核心 DLL 依赖
+        shell: pwsh
+        run: |
+          $dll = Join-Path $env:GITHUB_WORKSPACE 'build/windows/x64/runner/Release/duanju_core.dll'
+          if (-not (Test-Path $dll)) { throw "缺少原生核心：$dll" }
+          $dumpbin = Get-ChildItem -Path "${env:ProgramFiles}\Microsoft Visual Studio\2022\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dumpbin) { Write-Host "未找到 dumpbin，跳过依赖检查。"; exit 0 }
+          $report = & $dumpbin.FullName /dependents $dll | Out-String
+          Write-Host $report
+          $missing = @('libwinpthread-1.dll', 'libgcc_s_seh-1.dll', 'libstdc++-6.dll') |
+            Where-Object { $report -match [regex]::Escape($_) }
+          if ($missing.Count -gt 0) {
+            throw "duanju_core.dll 依赖 MinGW 运行时（$($missing -join ', ')），目标机器无法直接运行。"
+          }
+      - name: 准备 FFmpeg
+        run: choco install ffmpeg --yes --no-progress
+        continue-on-error: true
+      # 构建机没有音频和图形设备，自检结果只作参考，不阻塞出包。
+      - name: 播放自检
+        run: python scripts/smoke_windows.py ${{ matrix.arguments }}
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.edition }}-windows
+          path: dist/windows/*
+          if-no-files-found: error
+          retention-days: 14
 
   ios:
-    if: false
-    needs: checks
     runs-on: macos-latest
     timeout-minutes: 60
     strategy:
@@ -169,10 +222,42 @@ jobs:
             arguments: '--all-sources'
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/go.mod
+          cache-dependency-path: native/go.sum
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - name: 检查构建工具链
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          pod --version
+          go version
+      # 未签名构建，不需要证书与描述文件；IPA 由用户自行签名后安装。
+      - name: 构建 iOS 未签名包
+        run: python3 scripts/build_ios.py ${{ matrix.arguments }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.edition }}-ios-unsigned
+          path: dist/ios/*
+          if-no-files-found: error
+          retention-days: 14
 
   release:
-    needs: [android]
-    if: always() && needs.android.result == 'success'
+    needs: [android, windows, ios]
+    if: >-
+      always()
+      && github.event_name != 'pull_request'
+      && needs.android.result == 'success'
+      && needs.windows.result == 'success'
+      && needs.ios.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
